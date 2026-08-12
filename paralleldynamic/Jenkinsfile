@@ -1,0 +1,80 @@
+<![CDATA[
+// Source: https://github.com/jenkinsci/pipeline-examples (MIT License)
+// Test case: Complex parallel execution with dynamic job triggering
+import jenkins.model.*
+
+def stepsForParallel = [:]
+
+@NonCPS
+def getDownstreamJobs(jobPattern) {
+    return Jenkins.instance.getAllItems()
+           .findAll { it.name ==~ ~"${jobPattern}" }
+           .collect { [name: it.name, fullName: it.fullName] }
+}
+
+node {
+    stage('Preparation') {
+        // Discover jobs matching pattern
+        def jobs = getDownstreamJobs('test-(dev|stage)-(unit|integration)')
+        
+        // Create parallel execution steps
+        for (int i = 0; i < jobs.size(); i++) {
+            def job = jobs[i]
+            stepsForParallel[job.name] = {
+                build job: job.fullName, 
+                      parameters: [
+                          string(name: 'BRANCH', value: env.BRANCH_NAME),
+                          string(name: 'BUILD_NUMBER', value: env.BUILD_NUMBER)
+                      ],
+                      wait: true,
+                      propagate: false
+            }
+        }
+        
+        // Add static parallel jobs
+        stepsForParallel["unit-tests"] = {
+            node('test') {
+                checkout scm
+                sh 'mvn test -Dtest.type=unit'
+                publishTestResults testResultsPattern: '**/surefire-reports/*.xml'
+            }
+        }
+        
+        stepsForParallel["integration-tests"] = {
+            node('test') {
+                checkout scm
+                sh 'mvn test -Dtest.type=integration'
+                publishTestResults testResultsPattern: '**/failsafe-reports/*.xml'
+            }
+        }
+        
+        stepsForParallel["security-scan"] = {
+            node('security') {
+                checkout scm
+                sh 'dependency-check --project "MyApp" --scan . --format XML'
+                publishHTML([
+                    allowMissing: false,
+                    alwaysLinkToLastBuild: true,
+                    keepAll: true,
+                    reportDir: 'target',
+                    reportFiles: 'dependency-check-report.html',
+                    reportName: 'Security Report'
+                ])
+            }
+        }
+    }
+    
+    stage('Parallel Execution') {
+        parallel stepsForParallel
+    }
+    
+    stage('Collect Results') {
+        echo "All parallel jobs completed"
+        // Collect and aggregate results
+        sh '''
+            echo "Collecting test results..."
+            find . -name "*.xml" -path "*/test-results/*" | head -10
+        '''
+    }
+}
+    ]]>
